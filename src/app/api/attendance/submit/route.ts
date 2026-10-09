@@ -1,0 +1,244 @@
+import { NextResponse } from "next/server";
+import { dbService } from "@/lib/db-service";
+import { extractTokenFromHeader, verifyAccessToken } from "@/lib/jwt";
+import { verifyAndConsumeChallenge } from "@/lib/liveness";
+import { validateGeofenceAndLocation } from "@/lib/geofence";
+import { calculateEuclideanDistance, evaluateFaceMatch } from "@/lib/crypto";
+import { createAuditLog } from "@/lib/audit";
+
+export async function POST(req: Request) {
+  try {
+    const authHeader = req.headers.get("authorization");
+    const token = extractTokenFromHeader(authHeader);
+
+    if (!token) {
+      return NextResponse.json({ error: "Sesi tidak ditemukan atau kedaluwarsa." }, { status: 401 });
+    }
+
+    const payload = verifyAccessToken(token);
+    if (!payload) {
+      return NextResponse.json({ error: "Sesi tidak valid." }, { status: 401 });
+    }
+
+    const body = await req.json();
+    const {
+      challengeToken,
+      faceDescriptor,
+      latitude,
+      longitude,
+      accuracyMeters,
+      type = "CHECK_IN", // CHECK_IN | CHECK_OUT
+      deviceId,
+      snapshotUrl,
+      notes,
+    } = body;
+
+    // 1. Validasi Kehadiran Wajah / Biometrik
+    if (!faceDescriptor || !Array.isArray(faceDescriptor) || faceDescriptor.length !== 128) {
+      return NextResponse.json(
+        { error: "Vektor wajah tidak terdeteksi atau tidak valid. Pastikan wajah terlihat jelas di kamera." },
+        { status: 400 }
+      );
+    }
+
+    // 2. Verifikasi Liveness Challenge (Anti-Replay Attack)
+    if (!challengeToken) {
+      return NextResponse.json(
+        { error: "Challenge token liveness wajib disertakan." },
+        { status: 400 }
+      );
+    }
+    const challengeResult = verifyAndConsumeChallenge(challengeToken);
+    if (!challengeResult.isValid) {
+      return NextResponse.json(
+        { error: challengeResult.error || "Tantangan liveness tidak valid atau sudah kedaluwarsa. Ulangi proses absensi." },
+        { status: 400 }
+      );
+    }
+
+    // 3. Ambil data user & lokasi kantor
+    const user = await dbService.findUserById(payload.userId);
+    if (!user) {
+      return NextResponse.json({ error: "Data karyawan tidak ditemukan." }, { status: 404 });
+    }
+
+    // Device lock check
+    if (user.deviceId && deviceId && user.deviceId !== deviceId) {
+      return NextResponse.json(
+        {
+          error: "Akses ditolak: Device ID tidak sesuai dengan perangkat terdaftar untuk akun ini.",
+          securityAlert: "DEVICE_MISMATCH",
+        },
+        { status: 403 }
+      );
+    }
+
+    // Branch check
+    const branches = await dbService.getAllBranches();
+    const branch =
+      branches.find((b) => b.id === user.branchId) ||
+      branches[0] || {
+        latitude: -6.2088,
+        longitude: 106.8456,
+        radiusMeters: 200,
+        name: "Kantor Default",
+      };
+
+    // 4. Validasi Geofence & Akurasi GPS
+    const geoValidation = validateGeofenceAndLocation(
+      Number(latitude),
+      Number(longitude),
+      Number(accuracyMeters),
+      branch.latitude,
+      branch.longitude,
+      branch.radiusMeters
+    );
+
+    if (geoValidation.isMockLocationSuspected) {
+      return NextResponse.json(
+        {
+          error: `Lokasi mencurigakan terdeteksi: ${geoValidation.mockReason}. Harap matikan aplikasi Mock GPS / Fake Location.`,
+          securityAlert: "MOCK_GPS_DETECTED",
+        },
+        { status: 400 }
+      );
+    }
+
+    if (!geoValidation.isAccuracyAcceptable) {
+      return NextResponse.json(
+        {
+          error: `Akurasi sinyal GPS Anda terlalu buruk (${accuracyMeters.toFixed(0)} meter). Maksimal toleransi adalah ${process.env.MAX_GPS_ACCURACY_METERS || 100} meter. Silakan ke area terbuka atau nyalakan akurasi tinggi GPS di perangkat Anda.`,
+          accuracyMeters,
+          requiredAccuracy: Number(process.env.MAX_GPS_ACCURACY_METERS) || 100,
+        },
+        { status: 400 }
+      );
+    }
+
+    if (!geoValidation.isWithinGeofence) {
+      return NextResponse.json(
+        {
+          error: `Anda berada di luar radius kantor (${geoValidation.distanceMeters.toFixed(0)} meter dari ${branch.name}). Maksimal radius yang diizinkan adalah ${branch.radiusMeters} meter.`,
+          distanceMeters: geoValidation.distanceMeters,
+          radiusMeters: branch.radiusMeters,
+          officeName: branch.name,
+        },
+        { status: 400 }
+      );
+    }
+
+    // 5. Validasi Pencocokan Wajah dengan Template Terdaftar (Server-Side Matching)
+    const storedDescriptor = await dbService.getActiveFaceTemplate(user.id);
+    if (!storedDescriptor) {
+      return NextResponse.json(
+        {
+          error: "Anda belum mendaftarkan wajah (Face Enrollment). Silakan lakukan pendaftaran wajah terlebih dahulu pada menu profil.",
+          requiresEnrollment: true,
+        },
+        { status: 400 }
+      );
+    }
+
+    const distance = calculateEuclideanDistance(faceDescriptor, storedDescriptor);
+    const matchEvaluation = evaluateFaceMatch(distance);
+
+    if (!matchEvaluation.isMatch) {
+      return NextResponse.json(
+        {
+          error: `Verifikasi wajah gagal. Jarak kemiripan tidak mencukupi (Skor: ${matchEvaluation.confidencePercentage}%, Jarak: ${matchEvaluation.distance}). Pastikan wajah Anda menghadap kamera dengan pencahayaan yang cukup.`,
+          matchScore: matchEvaluation.confidencePercentage,
+          distance: matchEvaluation.distance,
+        },
+        { status: 401 }
+      );
+    }
+
+    // 6. Evaluasi Status Kehadiran Terhadap Shift (Waktu Server Resmi)
+    const serverTime = new Date();
+    const hours = String(serverTime.getHours()).padStart(2, "0");
+    const minutes = String(serverTime.getMinutes()).padStart(2, "0");
+    const currentTimeStr = `${hours}:${minutes}`;
+
+    let attendanceStatus: "ON_TIME" | "LATE" | "EARLY_DEPARTURE" = "ON_TIME";
+
+    if (user.shift) {
+      if (type === "CHECK_IN") {
+        const [shiftH, shiftM] = user.shift.startTime.split(":").map(Number);
+        const shiftStartTotalMinutes = shiftH * 60 + shiftM;
+        const currentTotalMinutes = serverTime.getHours() * 60 + serverTime.getMinutes();
+        const tolerance = user.shift.lateToleranceMinutes || 15;
+
+        if (currentTotalMinutes > shiftStartTotalMinutes + tolerance) {
+          attendanceStatus = "LATE";
+        }
+      } else if (type === "CHECK_OUT") {
+        const [shiftH, shiftM] = user.shift.endTime.split(":").map(Number);
+        const shiftEndTotalMinutes = shiftH * 60 + shiftM;
+        const currentTotalMinutes = serverTime.getHours() * 60 + serverTime.getMinutes();
+
+        if (currentTotalMinutes < shiftEndTotalMinutes) {
+          attendanceStatus = "EARLY_DEPARTURE";
+        }
+      }
+    }
+
+    // 7. Simpan Absensi ke Database
+    const attendance = await dbService.createAttendance({
+      userId: user.id,
+      branchId: branch.id,
+      shiftId: user.shiftId,
+      type,
+      status: attendanceStatus,
+      latitude: Number(latitude),
+      longitude: Number(longitude),
+      accuracyMeters: Number(accuracyMeters),
+      distanceToOfficeMeters: geoValidation.distanceMeters,
+      isWithinGeofence: true,
+      isMockLocationDetected: false,
+      faceMatchScore: matchEvaluation.distance,
+      livenessVerified: true,
+      deviceId: deviceId || "web-client",
+      ipAddress: req.headers.get("x-forwarded-for") || "127.0.0.1",
+      userAgent: req.headers.get("user-agent") || undefined,
+      snapshotUrl: snapshotUrl || null,
+      notes: notes || null,
+    });
+
+    // 8. Catat Audit Log
+    await createAuditLog({
+      userId: user.id,
+      action: "CREATE",
+      entityName: "attendances",
+      entityId: attendance.id,
+      newValues: {
+        type,
+        status: attendanceStatus,
+        distanceMeters: geoValidation.distanceMeters,
+        faceMatchDistance: matchEvaluation.distance,
+        serverTime: serverTime.toISOString(),
+      },
+    });
+
+    return NextResponse.json({
+      success: true,
+      message: `Presensi ${type === "CHECK_IN" ? "Masuk" : "Pulang"} Berhasil Tercatat!`,
+      data: {
+        id: attendance.id,
+        type,
+        status: attendanceStatus,
+        serverTimestamp: serverTime.toISOString(),
+        officeName: branch.name,
+        distanceMeters: geoValidation.distanceMeters,
+        accuracyMeters: Number(accuracyMeters),
+        matchConfidence: matchEvaluation.confidencePercentage,
+        matchDistance: matchEvaluation.distance,
+      },
+    });
+  } catch (error: any) {
+    console.error("Attendance submission error:", error);
+    return NextResponse.json(
+      { error: "Gagal memproses absensi: " + error.message },
+      { status: 500 }
+    );
+  }
+}

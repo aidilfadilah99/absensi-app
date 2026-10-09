@@ -1,0 +1,234 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  SUPERADMIN
+  HR_ADMIN
+  EMPLOYEE
+}
+
+enum AttendanceType {
+  CHECK_IN
+  CHECK_OUT
+}
+
+enum AttendanceStatus {
+  ON_TIME
+  LATE
+  EARLY_DEPARTURE
+  OVERTIME
+}
+
+enum LeaveType {
+  SICK
+  PERMIT
+  ANNUAL_LEAVE
+  OUTSTATION
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+  LOGIN
+  ENROLL_FACE
+  DEVICE_BIND
+  RESET_FACE
+}
+
+model Branch {
+  id           String        @id @default(uuid())
+  code         String        @unique
+  name         String
+  address      String
+  latitude     Float
+  longitude    Float
+  radiusMeters Int           @default(150)
+  timezone     String        @default("Asia/Jakarta")
+  isActive     Boolean       @default(true)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  users        User[]
+  attendances  Attendance[]
+
+  @@map("branches")
+}
+
+model Shift {
+  id                               String       @id @default(uuid())
+  name                             String
+  startTime                        String       // "08:00"
+  endTime                          String       // "17:00"
+  lateToleranceMinutes             Int          @default(15)
+  earlyDepartureToleranceMinutes   Int          @default(0)
+  isActive                         Boolean      @default(true)
+  createdAt                        DateTime     @default(now())
+  updatedAt                        DateTime     @updatedAt
+
+  users                            User[]
+  attendances                      Attendance[]
+
+  @@map("shifts")
+}
+
+model User {
+  id                   String        @id @default(uuid())
+  nik                  String        @unique
+  name                 String
+  email                String        @unique
+  passwordHash         String
+  phoneNumber          String?
+  role                 UserRole      @default(EMPLOYEE)
+  branchId             String?
+  shiftId              String?
+
+  deviceId             String?
+  deviceName           String?
+  deviceBoundAt        DateTime?
+
+  isActive             Boolean       @default(true)
+  pdpConsentAccepted   Boolean       @default(false)
+  pdpConsentAt         DateTime?
+
+  refreshTokenHash     String?
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
+
+  branch               Branch?       @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  shift                Shift?        @relation(fields: [shiftId], references: [id], onDelete: SetNull)
+
+  faceTemplates        FaceTemplate[]
+  attendances          Attendance[]
+  leaveRequests        LeaveRequest[]
+  deviceChangeRequests DeviceChangeRequest[]
+  auditLogs            AuditLog[]
+
+  @@map("users")
+}
+
+model FaceTemplate {
+  id                  String    @id @default(uuid())
+  userId              String
+  encryptedEmbedding  String    // Base64 encrypted byte buffer
+  iv                  String    // Base64 initialization vector (12 bytes)
+  authTag             String    // Base64 auth tag (16 bytes)
+  sampleCount         Int       @default(3)
+  modelVersion        String    @default("vladmandic-face-api-ssd-mobilenet")
+  isActive            Boolean   @default(true)
+  enrolledAt          DateTime  @default(now())
+  approvedById        String?
+  approvedAt          DateTime?
+
+  user                User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isActive])
+  @@map("face_templates")
+}
+
+model Attendance {
+  id                     String           @id @default(uuid())
+  userId                 String
+  branchId               String?
+  shiftId                String?
+  type                   AttendanceType
+  status                 AttendanceStatus
+  timestampServer        DateTime         @default(now())
+
+  latitude               Float
+  longitude              Float
+  accuracyMeters         Float
+  distanceToOfficeMeters Float
+  isWithinGeofence       Boolean
+  isMockLocationDetected Boolean          @default(false)
+
+  faceMatchScore         Float            // Confidence score 0.0 - 1.0 or Euclidean distance
+  livenessVerified       Boolean          @default(true)
+
+  deviceId               String
+  ipAddress              String
+  userAgent              String?
+  snapshotUrl            String?          // Data URI or storage URL of capture snapshot
+  notes                  String?
+
+  createdAt              DateTime         @default(now())
+
+  user                   User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  branch                 Branch?          @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  shift                  Shift?           @relation(fields: [shiftId], references: [id], onDelete: SetNull)
+
+  @@index([userId, timestampServer])
+  @@index([branchId, timestampServer])
+  @@index([status])
+  @@map("attendances")
+}
+
+model LeaveRequest {
+  id              String         @id @default(uuid())
+  userId          String
+  type            LeaveType
+  startDate       DateTime
+  endDate         DateTime
+  reason          String
+  attachmentUrl   String?
+  status          ApprovalStatus @default(PENDING)
+  approvedById    String?
+  approvedAt      DateTime?
+  rejectionReason String?
+
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  user            User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, startDate, endDate])
+  @@map("leave_requests")
+}
+
+model DeviceChangeRequest {
+  id            String         @id @default(uuid())
+  userId        String
+  oldDeviceId   String?
+  newDeviceId   String
+  newDeviceName String?
+  reason        String
+  status        ApprovalStatus @default(PENDING)
+  approvedById  String?
+  approvedAt    DateTime?
+  createdAt     DateTime       @default(now())
+
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("device_change_requests")
+}
+
+model AuditLog {
+  id         Int         @id @default(autoincrement())
+  userId     String?
+  action     AuditAction
+  entityName String
+  entityId   String?
+  oldValues  String?     // JSON string
+  newValues  String?     // JSON string
+  ipAddress  String
+  userAgent  String?
+  createdAt  DateTime    @default(now())
+
+  user       User?       @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId, action, createdAt])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
