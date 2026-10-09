@@ -5,6 +5,11 @@ export const metadata: Metadata = {
   title: "PresensiPro - Absensi Karyawan Biometrik & Geofence",
   description:
     "Aplikasi absensi mobile-friendly dengan verifikasi biometrik wajah (active liveness), geofencing GPS akurat, dan kepatuhan UU PDP.",
+  manifest: "/manifest.json",
+  icons: {
+    icon: "/icon.svg",
+    apple: "/icon.svg",
+  },
 };
 
 export const viewport: Viewport = {
