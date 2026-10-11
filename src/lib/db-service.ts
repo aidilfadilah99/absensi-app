@@ -1,9 +1,12 @@
 import fs from "fs";
+import fsPromises from "fs/promises";
 import path from "path";
 import net from "net";
 import bcrypt from "bcryptjs";
 import { prisma } from "./prisma";
 import { encryptBiometricEmbedding, decryptBiometricEmbedding } from "./crypto";
+import { getZonedDateTimeParts } from "./security";
+
 
 export interface MockUser {
   id: string;
@@ -204,17 +207,22 @@ function loadStore(): LocalStoreData {
   return initialStore;
 }
 
+let asyncWriteChain: Promise<void> = Promise.resolve();
+
 function saveStore(storeData?: LocalStoreData) {
   const data = storeData || global.__presensiStore;
   if (!data) return;
-  try {
-    if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
-    }
-    fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2), "utf-8");
-  } catch (e) {
-    // Ignore write errors in read-only environments
-  }
+
+  // Serialize writes asynchronously on background promise chain to avoid blocking Node.js Event Loop
+  const serializedPayload = JSON.stringify(data);
+  asyncWriteChain = asyncWriteChain
+    .then(async () => {
+      await fsPromises.mkdir(DATA_DIR, { recursive: true });
+      await fsPromises.writeFile(DATA_FILE, serializedPayload, "utf-8");
+    })
+    .catch(() => {
+      // Ignore write errors in read-only environments
+    });
 }
 
 /**
@@ -691,32 +699,57 @@ export const dbService = {
   },
 
   async getTodayStats() {
-    const today = new Date().toISOString().slice(0, 10);
-    const allUsers = await this.getAllUsers();
-    const totalEmployees = allUsers.filter((u) => u.role === "EMPLOYEE").length;
-
+    const todayWib = getZonedDateTimeParts(new Date(), "Asia/Jakarta").dateStr;
+    let totalEmployees = 0;
     let attendances: any[] = [];
+
     if (await testDbConnection()) {
+      totalEmployees = await prisma.user.count({
+        where: { role: "EMPLOYEE", isActive: true },
+      });
+      // Query range covering WIB (UTC+7) day start & end
+      const startOfWibDay = new Date(`${todayWib}T00:00:00.000+07:00`);
+      const endOfWibDay = new Date(`${todayWib}T23:59:59.999+07:00`);
       attendances = await prisma.attendance.findMany({
         where: {
           timestampServer: {
-            gte: new Date(today + "T00:00:00.000Z"),
-            lte: new Date(today + "T23:59:59.999Z"),
+            gte: startOfWibDay,
+            lte: endOfWibDay,
           },
+        },
+        select: {
+          userId: true,
+          type: true,
+          status: true,
+          timestampServer: true,
         },
       });
     } else {
       const store = loadStore();
+      totalEmployees = store.users.filter((u) => u.role === "EMPLOYEE" && u.isActive).length;
       attendances = store.attendances.filter((a) => {
-        const d = new Date(a.timestampServer).toISOString().slice(0, 10);
-        return d === today;
+        const d = getZonedDateTimeParts(new Date(a.timestampServer), "Asia/Jakarta").dateStr;
+        return d === todayWib;
       });
     }
 
     const checkIns = attendances.filter((a) => a.type === "CHECK_IN");
-    const onTimeCount = checkIns.filter((a) => a.status === "ON_TIME").length;
-    const lateCount = checkIns.filter((a) => a.status === "LATE").length;
-    const presentCount = checkIns.length;
+    // Deduplicate by userId so multiple check-ins by the same user never inflate stats
+    const uniqueByUser = new Map<string, string>();
+    for (const record of checkIns) {
+      if (!uniqueByUser.has(record.userId)) {
+        uniqueByUser.set(record.userId, record.status);
+      }
+    }
+
+    let onTimeCount = 0;
+    let lateCount = 0;
+    uniqueByUser.forEach((status) => {
+      if (status === "ON_TIME") onTimeCount += 1;
+      else if (status === "LATE") lateCount += 1;
+    });
+
+    const presentCount = uniqueByUser.size;
     const absentCount = Math.max(0, totalEmployees - presentCount);
 
     return {

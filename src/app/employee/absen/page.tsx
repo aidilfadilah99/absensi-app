@@ -172,6 +172,7 @@ function AbsenContent() {
             id: branchId,
             latitude: lat,
             longitude: lng,
+            isCalibration: true,
           }),
         });
         if (res.ok) {
@@ -227,6 +228,30 @@ function AbsenContent() {
     }
   }, [userLocation, user]);
 
+  // Refresh challenge token helper
+  const refreshChallengeToken = async (token: string | null) => {
+    if (!token) return null;
+    try {
+      const chRes = await fetch("/api/attendance/challenge", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (chRes.ok) {
+        const chData = await chRes.json();
+        const nextChallenge = {
+          token: chData.challengeToken,
+          action: chData.action,
+          instructionText: chData.instructionText,
+        };
+        setChallenge(nextChallenge);
+        return nextChallenge.token;
+      }
+    } catch {
+      // ignore
+    }
+    return null;
+  };
+
   // Handle liveness complete & submit
   const handleLivenessComplete = async (faceDescriptor: number[], snapshotUrl: string) => {
     setSubmitting(true);
@@ -243,6 +268,11 @@ function AbsenContent() {
     };
 
     try {
+      let activeChallengeToken = challenge?.token;
+      if (!activeChallengeToken) {
+        activeChallengeToken = (await refreshChallengeToken(token)) || undefined;
+      }
+
       const res = await fetch("/api/attendance/submit", {
         method: "POST",
         headers: {
@@ -250,7 +280,7 @@ function AbsenContent() {
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
-          challengeToken: challenge?.token || "demo-token",
+          challengeToken: activeChallengeToken,
           faceDescriptor,
           latitude: loc.latitude,
           longitude: loc.longitude,
@@ -262,6 +292,9 @@ function AbsenContent() {
       });
 
       const data = await res.json();
+      // Always issue a fresh challenge token after an attempt
+      await refreshChallengeToken(token);
+
       if (!res.ok) {
         if (data.requiresEnrollment) {
           setRequiresEnrollment(true);

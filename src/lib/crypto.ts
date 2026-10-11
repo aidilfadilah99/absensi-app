@@ -5,7 +5,14 @@ const IV_LENGTH = 12; // 96 bits for GCM
 
 // Get 32-byte key from environment or fallback hash
 function getEncryptionKey(): Buffer {
-  const keyHex = process.env.BIOMETRIC_ENCRYPTION_KEY || "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+  const envKey = process.env.BIOMETRIC_ENCRYPTION_KEY;
+  if (!envKey && process.env.STRICT_PRODUCTION_SECRETS === "true") {
+    throw new Error(
+      "CRITICAL SECURITY ERROR: BIOMETRIC_ENCRYPTION_KEY wajib dikonfigurasi untuk enkripsi data biometrik (UU PDP)."
+    );
+  }
+  const keyHex =
+    envKey || "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
   return crypto.createHash("sha256").update(keyHex).digest();
 }
 
