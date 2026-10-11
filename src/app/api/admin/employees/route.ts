@@ -92,7 +92,7 @@ export async function PUT(req: Request) {
     }
 
     if (action === "RESET_FACE") {
-      await dbService.resetUserFace(targetUserId, payload.userId);
+      await dbService.resetUserFace(targetUserId);
       await createAuditLog({
         userId: payload.userId,
         action: "RESET_FACE",
@@ -101,6 +101,18 @@ export async function PUT(req: Request) {
         newValues: { resetBy: payload.userId },
       });
       return NextResponse.json({ message: "Wajah karyawan berhasil di-reset. Karyawan dapat mendaftarkan ulang wajahnya." });
+    }
+
+    if (action === "RESET_DEVICE") {
+      await dbService.resetUserDevice(targetUserId);
+      await createAuditLog({
+        userId: payload.userId,
+        action: "DEVICE_BIND",
+        entityName: "users",
+        entityId: targetUserId,
+        newValues: { deviceResetBy: payload.userId },
+      });
+      return NextResponse.json({ message: "Kunci perangkat (Device ID) karyawan berhasil di-reset." });
     }
 
     return NextResponse.json({ error: "Aksi tidak dikenali." }, { status: 400 });

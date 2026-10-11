@@ -6,14 +6,12 @@ import Link from "next/link";
 import Navbar from "@/components/Navbar";
 import BottomNav from "@/components/BottomNav";
 import {
-  Users,
   Plus,
   RefreshCw,
   ArrowLeft,
   CheckCircle2,
   XCircle,
   Smartphone,
-  ShieldAlert,
 } from "lucide-react";
 
 export default function ManajemenKaryawanPage() {
@@ -24,8 +22,8 @@ export default function ManajemenKaryawanPage() {
   const [shifts, setShifts] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
-  // Form State
   const [formData, setFormData] = useState({
     nik: "",
     name: "",
@@ -78,6 +76,11 @@ export default function ManajemenKaryawanPage() {
     loadData();
   }, [router]);
 
+  const showToast = (msg: string) => {
+    setStatusMessage(msg);
+    setTimeout(() => setStatusMessage(null), 4000);
+  };
+
   const handleCreateEmployee = async (e: React.FormEvent) => {
     e.preventDefault();
     const token = localStorage.getItem("accessToken");
@@ -92,7 +95,8 @@ export default function ManajemenKaryawanPage() {
         body: JSON.stringify(formData),
       });
 
-      if (!res.ok) throw new Error("Gagal menambahkan karyawan");
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Gagal menambahkan karyawan");
 
       setIsModalOpen(false);
       setFormData({
@@ -105,20 +109,18 @@ export default function ManajemenKaryawanPage() {
         branchId: branches[0]?.id || "",
         shiftId: shifts[0]?.id || "",
       });
+      showToast("Karyawan baru berhasil ditambahkan!");
       loadData();
     } catch (err: any) {
-      alert(err.message);
+      showToast("Error: " + err.message);
     }
   };
 
-  const handleResetFace = async (empId: string, empName: string) => {
-    if (
-      !confirm(
-        `Apakah Anda yakin ingin me-reset data biometrik wajah karyawan ${empName}? Karyawan harus mendaftarkan wajahnya kembali.`
-      )
-    )
-      return;
-
+  const handleResetAction = async (
+    empId: string,
+    empName: string,
+    action: "RESET_FACE" | "RESET_DEVICE"
+  ) => {
     const token = localStorage.getItem("accessToken");
     try {
       const res = await fetch("/api/admin/employees", {
@@ -129,15 +131,20 @@ export default function ManajemenKaryawanPage() {
         },
         body: JSON.stringify({
           targetUserId: empId,
-          action: "RESET_FACE",
+          action,
         }),
       });
 
-      if (!res.ok) throw new Error("Gagal me-reset wajah.");
-      alert(`Data biometrik wajah ${empName} berhasil di-reset.`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Gagal memproses aksi.");
+      showToast(
+        action === "RESET_FACE"
+          ? `Biometrik wajah ${empName} berhasil di-reset.`
+          : `Kunci perangkat ${empName} berhasil di-reset.`
+      );
       loadData();
     } catch (err: any) {
-      alert(err.message);
+      showToast("Error: " + err.message);
     }
   };
 
@@ -156,17 +163,25 @@ export default function ManajemenKaryawanPage() {
             </Link>
             <h1 className="text-2xl font-black text-gray-900">Manajemen Karyawan</h1>
             <p className="text-xs text-gray-500">
-              Kelola data staf, penugasan kantor, jadwal shift, dan status biometrik wajah.
+              Kelola data staf, penugasan kantor, jadwal shift, biometrik wajah & kunci perangkat.
             </p>
           </div>
 
           <button
+            type="button"
             onClick={() => setIsModalOpen(true)}
             className="flex items-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2.5 text-xs font-bold text-white shadow-md hover:bg-indigo-700 transition"
           >
             <Plus className="h-4 w-4" /> Tambah Karyawan
           </button>
         </div>
+
+        {statusMessage && (
+          <div className="rounded-2xl border border-indigo-200 bg-indigo-50 p-3.5 text-xs font-semibold text-indigo-800 flex items-center gap-2 shadow-sm">
+            <CheckCircle2 className="h-4 w-4 text-indigo-600 shrink-0" />
+            <span>{statusMessage}</span>
+          </div>
+        )}
 
         {/* Modal Tambah Karyawan */}
         {isModalOpen && (
@@ -269,9 +284,8 @@ export default function ManajemenKaryawanPage() {
               <thead className="bg-gray-50 text-gray-500 uppercase font-semibold text-[10px]">
                 <tr>
                   <th className="p-3">Karyawan</th>
-                  <th className="p-3">Role</th>
                   <th className="p-3">Cabang Kantor</th>
-                  <th className="p-3">Jadwal Shift</th>
+                  <th className="p-3">Perangkat Terikat</th>
                   <th className="p-3">Biometrik Wajah</th>
                   <th className="p-3">Aksi Admin</th>
                 </tr>
@@ -287,21 +301,20 @@ export default function ManajemenKaryawanPage() {
                           {emp.nik} • {emp.email}
                         </div>
                       </td>
-                      <td className="p-3">
-                        <span
-                          className={`rounded px-2 py-0.5 text-[10px] font-bold ${
-                            emp.role === "HR_ADMIN"
-                              ? "bg-purple-50 text-purple-700"
-                              : "bg-slate-100 text-slate-700"
-                          }`}
-                        >
-                          {emp.role}
-                        </span>
-                      </td>
                       <td className="p-3 font-medium text-gray-700">
-                        {emp.branch?.name || "Belum Ditugaskan"}
+                        <div>{emp.branch?.name || "Kantor Pusat"}</div>
+                        <div className="text-[10px] text-gray-400">{emp.shift?.name || "Reguler"}</div>
                       </td>
-                      <td className="p-3 text-gray-600">{emp.shift?.name || "Reguler"}</td>
+                      <td className="p-3 text-gray-600">
+                        {emp.deviceId ? (
+                          <div>
+                            <div className="font-semibold text-gray-800">{emp.deviceName || "Web Device"}</div>
+                            <div className="font-mono text-[10px] text-gray-400">{emp.deviceId}</div>
+                          </div>
+                        ) : (
+                          <span className="text-gray-400 italic">Belum terikat</span>
+                        )}
+                      </td>
                       <td className="p-3">
                         <span
                           className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[10px] font-bold ${
@@ -322,13 +335,26 @@ export default function ManajemenKaryawanPage() {
                         </span>
                       </td>
                       <td className="p-3">
-                        <button
-                          onClick={() => handleResetFace(emp.id, emp.name)}
-                          className="flex items-center gap-1 rounded-lg border border-red-200 px-2.5 py-1 text-[11px] font-semibold text-red-600 hover:bg-red-50 transition"
-                          title="Reset Template Biometrik Wajah"
-                        >
-                          <RefreshCw className="h-3 w-3" /> Reset Wajah
-                        </button>
+                        <div className="flex flex-wrap gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => handleResetAction(emp.id, emp.name, "RESET_FACE")}
+                            className="flex items-center gap-1 rounded-lg border border-red-200 px-2.5 py-1 text-[11px] font-semibold text-red-600 hover:bg-red-50 transition"
+                            title="Reset Template Biometrik Wajah"
+                          >
+                            <RefreshCw className="h-3 w-3" /> Reset Wajah
+                          </button>
+                          {emp.deviceId && (
+                            <button
+                              type="button"
+                              onClick={() => handleResetAction(emp.id, emp.name, "RESET_DEVICE")}
+                              className="flex items-center gap-1 rounded-lg border border-indigo-200 px-2.5 py-1 text-[11px] font-semibold text-indigo-600 hover:bg-indigo-50 transition"
+                              title="Reset Kunci Perangkat"
+                            >
+                              <Smartphone className="h-3 w-3" /> Reset Device
+                            </button>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   );

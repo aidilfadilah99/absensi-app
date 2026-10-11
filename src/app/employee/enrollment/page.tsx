@@ -6,7 +6,7 @@ import Link from "next/link";
 import Navbar from "@/components/Navbar";
 import BottomNav from "@/components/BottomNav";
 import CameraLiveness from "@/components/CameraLiveness";
-import { ArrowLeft, CheckCircle2, ShieldCheck, Sparkles, AlertCircle } from "lucide-react";
+import { ArrowLeft, CheckCircle2, AlertCircle } from "lucide-react";
 
 export default function EnrollmentPage() {
   const router = useRouter();
@@ -41,7 +41,6 @@ export default function EnrollmentPage() {
     if (currentStep < 3) {
       setCurrentStep(currentStep + 1);
     } else {
-      // Completed 3 samples -> Average and submit
       await finalizeEnrollment(newSamples);
     }
   };
@@ -50,7 +49,6 @@ export default function EnrollmentPage() {
     setIsSaving(true);
     const token = localStorage.getItem("accessToken");
 
-    // Compute average 128-d vector
     const avgDescriptor: number[] = new Array(128).fill(0);
     for (let i = 0; i < 128; i++) {
       let sum = 0;
@@ -77,9 +75,9 @@ export default function EnrollmentPage() {
       if (!res.ok) throw new Error(data.error || "Gagal menyimpan pendaftaran wajah.");
 
       setIsSuccess(true);
-      // Update local storage state
       if (user) {
         const updated = { ...user, isBiometricEnrolled: true };
+        setUser(updated);
         localStorage.setItem("userProfile", JSON.stringify(updated));
       }
     } catch (err: any) {
@@ -94,7 +92,6 @@ export default function EnrollmentPage() {
       <Navbar user={user} />
 
       <main className="mx-auto max-w-lg px-4 pt-3 space-y-4">
-        {/* Back Link */}
         <Link
           href="/employee"
           className="inline-flex items-center gap-1.5 text-xs font-semibold text-gray-600 hover:text-gray-900"
@@ -119,7 +116,7 @@ export default function EnrollmentPage() {
               href="/employee/absen"
               className="mt-6 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 py-3 text-sm font-bold text-white shadow hover:bg-indigo-700"
             >
-              Coba Absen Sekarang
+              Lanjut ke Halaman Absensi
             </Link>
           </div>
         ) : (
@@ -169,23 +166,23 @@ export default function EnrollmentPage() {
               </div>
             )}
 
-            {/* Active Step Details */}
             <div className="rounded-xl bg-indigo-50/50 border border-indigo-100 p-3 text-xs text-indigo-900">
               <span className="font-bold">{steps[currentStep - 1].title}: </span>
               <span>{steps[currentStep - 1].desc}</span>
             </div>
 
-            {/* Camera Component */}
             <CameraLiveness
-              key={currentStep}
+              stepKey={currentStep}
               isEnrolling={true}
               instructionText={steps[currentStep - 1].desc}
               onLivenessComplete={(descriptor) => handleCaptureSample(descriptor)}
             />
 
-            <div className="text-center text-[11px] text-gray-500">
-              * Pastikan pencahayaan cukup dan wajah tidak terhalang masker atau kacamata hitam tebal.
-            </div>
+            {isSaving && (
+              <div className="rounded-xl bg-indigo-600 p-3 text-center text-xs font-bold text-white animate-pulse">
+                Mengenkripsi & Menyimpan Vektor Biometrik 128-Dimensi...
+              </div>
+            )}
           </div>
         )}
       </main>

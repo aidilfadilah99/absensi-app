@@ -1,4 +1,4 @@
-import { prisma } from "./prisma";
+import { dbService } from "./db-service";
 
 export async function createAuditLog({
   userId,
@@ -20,19 +20,17 @@ export async function createAuditLog({
   userAgent?: string;
 }) {
   try {
-    await prisma.auditLog.create({
-      data: {
-        userId: userId || undefined,
-        action,
-        entityName,
-        entityId: entityId || undefined,
-        oldValues: oldValues ? JSON.stringify(oldValues) : undefined,
-        newValues: newValues ? JSON.stringify(newValues) : undefined,
-        ipAddress,
-        userAgent,
-      },
+    await dbService.createAuditLogEntry({
+      userId,
+      action,
+      entityName,
+      entityId,
+      oldValues,
+      newValues,
+      ipAddress,
+      userAgent,
     });
   } catch (err) {
-    console.warn("Audit log creation skipped (fallback):", err);
+    console.warn("Audit log creation skipped:", err);
   }
 }

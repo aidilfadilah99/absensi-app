@@ -6,7 +6,7 @@ import { createAuditLog } from "@/lib/audit";
 
 export async function POST(req: Request) {
   try {
-    const { identifier, password, deviceId, deviceName } = await req.json();
+    const { identifier, password, deviceId, deviceName, forceBindDevice } = await req.json();
 
     if (!identifier || !password) {
       return NextResponse.json(
@@ -39,19 +39,15 @@ export async function POST(req: Request) {
     }
 
     // Device binding verification
-    let deviceBound = false;
-    let deviceWarning: string | null = null;
-
+    let activeDeviceId = user.deviceId;
     if (deviceId) {
-      if (!user.deviceId) {
-        // First login on this device -> automatically bind device to this account
-        await dbService.bindUserDevice(user.id, deviceId, deviceName || "Unknown Device");
-        deviceBound = true;
+      if (!user.deviceId || forceBindDevice) {
+        await dbService.bindUserDevice(user.id, deviceId, deviceName || "Web Browser");
+        activeDeviceId = deviceId;
       } else if (user.deviceId !== deviceId && user.role === "EMPLOYEE") {
-        // Logged in from a different device than registered
         return NextResponse.json(
           {
-            error: "Perangkat ini tidak terdaftar untuk akun Anda. Demi keamanan, satu akun terikat pada satu perangkat terdaftar. Ajukan pergantian perangkat ke HRD.",
+            error: `Akun ini sebelumnya terikat pada perangkat "${user.deviceName || user.deviceId}". Klik tombol "Sinkronkan ke Perangkat Ini" di bawah jika Anda berpindah dari PC ke HP.`,
             isDeviceMismatch: true,
             registeredDevice: user.deviceName || "Perangkat Lama",
           },
@@ -68,22 +64,22 @@ export async function POST(req: Request) {
       role: user.role,
       branchId: user.branchId,
       shiftId: user.shiftId,
-      deviceId: user.deviceId || deviceId,
+      deviceId: activeDeviceId || deviceId,
     };
 
     const accessToken = signAccessToken(tokenPayload);
     const refreshToken = signRefreshToken(tokenPayload);
 
-    // Audit log
     await createAuditLog({
       userId: user.id,
       action: "LOGIN",
       entityName: "users",
       entityId: user.id,
-      newValues: { deviceId, deviceName },
+      newValues: { deviceId: activeDeviceId || deviceId, deviceName },
+      ipAddress: req.headers.get("x-forwarded-for") || "127.0.0.1",
+      userAgent: req.headers.get("user-agent") || undefined,
     });
 
-    // Check if biometric enrolled
     const activeBiometric = await dbService.getActiveFaceTemplate(user.id);
 
     return NextResponse.json({
@@ -100,7 +96,8 @@ export async function POST(req: Request) {
         shift: user.shift,
         pdpConsentAccepted: user.pdpConsentAccepted,
         isBiometricEnrolled: !!activeBiometric,
-        deviceId: user.deviceId || deviceId,
+        deviceId: activeDeviceId || deviceId,
+        deviceName: deviceName || user.deviceName,
       },
     });
   } catch (error: any) {

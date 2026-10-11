@@ -78,3 +78,42 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }
+
+export async function PUT(req: Request) {
+  try {
+    const authHeader = req.headers.get("authorization");
+    const token = extractTokenFromHeader(authHeader);
+
+    if (!token) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    const payload = verifyAccessToken(token);
+    if (!payload || (payload.role !== "HR_ADMIN" && payload.role !== "SUPERADMIN")) {
+      return NextResponse.json({ error: "Akses hanya untuk Administrator/HRD." }, { status: 403 });
+    }
+
+    const { id, status, rejectionReason } = await req.json();
+
+    if (!id || (status !== "APPROVED" && status !== "REJECTED")) {
+      return NextResponse.json({ error: "ID dan status valid wajib diisi." }, { status: 400 });
+    }
+
+    const updated = await dbService.updateLeaveStatus(id, status, payload.userId, rejectionReason);
+
+    await createAuditLog({
+      userId: payload.userId,
+      action: "UPDATE",
+      entityName: "leave_requests",
+      entityId: id,
+      newValues: { status, rejectionReason },
+    });
+
+    return NextResponse.json({
+      message: `Permohonan izin berhasil ${status === "APPROVED" ? "disetujui" : "ditolak"}.`,
+      leave: updated,
+    });
+  } catch (error: any) {
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+}

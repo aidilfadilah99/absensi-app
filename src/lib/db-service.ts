@@ -1,17 +1,39 @@
+import fs from "fs";
+import path from "path";
+import net from "net";
 import bcrypt from "bcryptjs";
 import { prisma } from "./prisma";
 import { encryptBiometricEmbedding, decryptBiometricEmbedding } from "./crypto";
 
-// Default initial mock data for instant out-of-the-box development & testing
+export interface MockUser {
+  id: string;
+  nik: string;
+  name: string;
+  email: string;
+  passwordHash: string;
+  phoneNumber?: string;
+  role: string;
+  branchId: string | null;
+  shiftId: string | null;
+  deviceId: string | null;
+  deviceName: string | null;
+  deviceBoundAt: string | Date | null;
+  isActive: boolean;
+  pdpConsentAccepted: boolean;
+  pdpConsentAt: string | Date | null;
+  createdAt?: string | Date;
+  updatedAt?: string | Date;
+}
+
 const initialBranches = [
   {
     id: "branch-jkt-01",
     code: "JKT-HQ",
     name: "Kantor Pusat Jakarta",
-    address: "Jl. Sudirman Kav. 25, Jakarta Selatan",
+    address: "Jl. Jend. Sudirman Kav. 25, Jakarta Selatan",
     latitude: -6.2088,
     longitude: 106.8456,
-    radiusMeters: 200,
+    radiusMeters: 250,
     timezone: "Asia/Jakarta",
     isActive: true,
   },
@@ -31,7 +53,7 @@ const initialBranches = [
 const initialShifts = [
   {
     id: "shift-reguler-01",
-    name: "Shift Reguler Pagi",
+    name: "Shift Reguler Pagi (08:00 - 17:00)",
     startTime: "08:00",
     endTime: "17:00",
     lateToleranceMinutes: 15,
@@ -40,7 +62,7 @@ const initialShifts = [
   },
   {
     id: "shift-siang-01",
-    name: "Shift Siang",
+    name: "Shift Siang (13:00 - 21:00)",
     startTime: "13:00",
     endTime: "21:00",
     lateToleranceMinutes: 15,
@@ -50,26 +72,6 @@ const initialShifts = [
 ];
 
 const defaultPasswordHash = bcrypt.hashSync("Password123!", 10);
-
-interface MockUser {
-  id: string;
-  nik: string;
-  name: string;
-  email: string;
-  passwordHash: string;
-  phoneNumber?: string;
-  role: string;
-  branchId: string | null;
-  shiftId: string | null;
-  deviceId: string | null;
-  deviceName: string | null;
-  deviceBoundAt: Date | null;
-  isActive: boolean;
-  pdpConsentAccepted: boolean;
-  pdpConsentAt: Date | null;
-  createdAt?: Date;
-  updatedAt?: Date;
-}
 
 const initialUsers: MockUser[] = [
   {
@@ -87,7 +89,7 @@ const initialUsers: MockUser[] = [
     deviceBoundAt: null,
     isActive: true,
     pdpConsentAccepted: true,
-    pdpConsentAt: new Date(),
+    pdpConsentAt: new Date().toISOString(),
   },
   {
     id: "usr-emp-01",
@@ -103,8 +105,8 @@ const initialUsers: MockUser[] = [
     deviceName: null,
     deviceBoundAt: null,
     isActive: true,
-    pdpConsentAccepted: false,
-    pdpConsentAt: null,
+    pdpConsentAccepted: true,
+    pdpConsentAt: new Date().toISOString(),
   },
   {
     id: "usr-emp-02",
@@ -125,28 +127,147 @@ const initialUsers: MockUser[] = [
   },
 ];
 
-// In-Memory store fallback
-const memoryStore = {
-  branches: [...initialBranches],
-  shifts: [...initialShifts],
-  users: [...initialUsers] as MockUser[],
-  faceTemplates: [] as any[],
-  attendances: [] as any[],
-  leaveRequests: [] as any[],
-  deviceRequests: [] as any[],
-  auditLogs: [] as any[],
-};
+// Pre-compute a default encrypted face template for EMP001 so demo attendance works immediately
+function createDefaultFaceTemplates() {
+  const sampleDescriptor = Array.from({ length: 128 }, (_, i) => {
+    const seed = Math.sin(i * 997 + 42) * 0.5;
+    return Number(seed.toFixed(6));
+  });
+  const encrypted = encryptBiometricEmbedding(sampleDescriptor);
+  return [
+    {
+      id: "ft-default-emp01",
+      userId: "usr-emp-01",
+      encryptedEmbedding: encrypted.encryptedEmbedding,
+      iv: encrypted.iv,
+      authTag: encrypted.authTag,
+      sampleCount: 3,
+      modelVersion: "vladmandic-face-api-ssd-mobilenet",
+      isActive: true,
+      enrolledAt: new Date().toISOString(),
+    },
+  ];
+}
 
-// Check if PostgreSQL is available
-let isPrismaConnected: boolean | null = null;
+interface LocalStoreData {
+  branches: any[];
+  shifts: any[];
+  users: MockUser[];
+  faceTemplates: any[];
+  attendances: any[];
+  leaveRequests: any[];
+  deviceRequests: any[];
+  auditLogs: any[];
+}
+
+const DATA_DIR = path.join(process.cwd(), ".data");
+const DATA_FILE = path.join(DATA_DIR, "local-db.json");
+
+declare global {
+  // eslint-disable-next-line no-var
+  var __presensiStore: LocalStoreData | undefined;
+  // eslint-disable-next-line no-var
+  var __pgCheckResult: { connected: boolean; checkedAt: number } | undefined;
+}
+
+function loadStore(): LocalStoreData {
+  if (global.__presensiStore) {
+    return global.__presensiStore;
+  }
+
+  try {
+    if (fs.existsSync(DATA_FILE)) {
+      const raw = fs.readFileSync(DATA_FILE, "utf-8");
+      const parsed = JSON.parse(raw) as LocalStoreData;
+      if (parsed && Array.isArray(parsed.users) && parsed.users.length > 0) {
+        global.__presensiStore = parsed;
+        return parsed;
+      }
+    }
+  } catch (e) {
+    console.warn("Initializing fresh local database store.");
+  }
+
+  const initialStore: LocalStoreData = {
+    branches: [...initialBranches],
+    shifts: [...initialShifts],
+    users: [...initialUsers],
+    faceTemplates: createDefaultFaceTemplates(),
+    attendances: [],
+    leaveRequests: [],
+    deviceRequests: [],
+    auditLogs: [],
+  };
+
+  global.__presensiStore = initialStore;
+  saveStore(initialStore);
+  return initialStore;
+}
+
+function saveStore(storeData?: LocalStoreData) {
+  const data = storeData || global.__presensiStore;
+  if (!data) return;
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2), "utf-8");
+  } catch (e) {
+    // Ignore write errors in read-only environments
+  }
+}
+
+/**
+ * Fast non-blocking TCP socket check (150ms timeout) so we never hang 5-9 seconds
+ * waiting for Prisma when PostgreSQL service is not running locally.
+ */
 async function testDbConnection(): Promise<boolean> {
-  if (isPrismaConnected !== null) return isPrismaConnected;
+  const now = Date.now();
+  if (global.__pgCheckResult && now - global.__pgCheckResult.checkedAt < 60000) {
+    return global.__pgCheckResult.connected;
+  }
+
+  const dbUrl = process.env.DATABASE_URL || "";
+  let host = "127.0.0.1";
+  let port = 5432;
+
+  try {
+    const parsed = new URL(dbUrl);
+    host = parsed.hostname || "127.0.0.1";
+    port = Number(parsed.port) || 5432;
+  } catch {
+    // fallback default
+  }
+
+  const isPortOpen = await new Promise<boolean>((resolve) => {
+    const socket = new net.Socket();
+    socket.setTimeout(150);
+    socket.once("connect", () => {
+      socket.destroy();
+      resolve(true);
+    });
+    socket.once("timeout", () => {
+      socket.destroy();
+      resolve(false);
+    });
+    socket.once("error", () => {
+      socket.destroy();
+      resolve(false);
+    });
+    socket.connect(port, host);
+  });
+
+  if (!isPortOpen) {
+    global.__pgCheckResult = { connected: false, checkedAt: now };
+    return false;
+  }
+
   try {
     await prisma.$queryRaw`SELECT 1`;
-    isPrismaConnected = true;
+    global.__pgCheckResult = { connected: true, checkedAt: now };
     return true;
-  } catch (err) {
-    isPrismaConnected = false;
+  } catch {
+    global.__pgCheckResult = { connected: false, checkedAt: now };
     return false;
   }
 }
@@ -162,14 +283,15 @@ export const dbService = {
         include: { branch: true, shift: true },
       });
     }
-    const user = memoryStore.users.find(
+    const store = loadStore();
+    const cleanId = identifier.trim().toLowerCase();
+    const user = store.users.find(
       (u) =>
-        u.email.toLowerCase() === identifier.toLowerCase() ||
-        u.nik.toLowerCase() === identifier.toLowerCase()
+        u.email.toLowerCase() === cleanId || u.nik.toLowerCase() === cleanId
     );
     if (!user) return null;
-    const branch = memoryStore.branches.find((b) => b.id === user.branchId);
-    const shift = memoryStore.shifts.find((s) => s.id === user.shiftId);
+    const branch = store.branches.find((b) => b.id === user.branchId) || store.branches[0];
+    const shift = store.shifts.find((s) => s.id === user.shiftId) || store.shifts[0];
     return { ...user, branch, shift };
   },
 
@@ -180,24 +302,30 @@ export const dbService = {
         include: { branch: true, shift: true },
       });
     }
-    const user = memoryStore.users.find((u) => u.id === id);
+    const store = loadStore();
+    const user = store.users.find((u) => u.id === id);
     if (!user) return null;
-    const branch = memoryStore.branches.find((b) => b.id === user.branchId);
-    const shift = memoryStore.shifts.find((s) => s.id === user.shiftId);
+    const branch = store.branches.find((b) => b.id === user.branchId) || store.branches[0];
+    const shift = store.shifts.find((s) => s.id === user.shiftId) || store.shifts[0];
     return { ...user, branch, shift };
   },
 
   async getAllUsers() {
     if (await testDbConnection()) {
       return prisma.user.findMany({
-        include: { branch: true, shift: true, faceTemplates: { where: { isActive: true } } },
+        include: {
+          branch: true,
+          shift: true,
+          faceTemplates: { where: { isActive: true } },
+        },
         orderBy: { name: "asc" },
       });
     }
-    return memoryStore.users.map((u) => {
-      const branch = memoryStore.branches.find((b) => b.id === u.branchId);
-      const shift = memoryStore.shifts.find((s) => s.id === u.shiftId);
-      const faceTemplates = memoryStore.faceTemplates.filter(
+    const store = loadStore();
+    return store.users.map((u) => {
+      const branch = store.branches.find((b) => b.id === u.branchId) || store.branches[0];
+      const shift = store.shifts.find((s) => s.id === u.shiftId) || store.shifts[0];
+      const faceTemplates = store.faceTemplates.filter(
         (f) => f.userId === u.id && f.isActive
       );
       return { ...u, branch, shift, faceTemplates };
@@ -220,15 +348,16 @@ export const dbService = {
         },
       });
     }
-    const newUser = {
-      id: "usr-" + Math.random().toString(36).substr(2, 9),
+    const store = loadStore();
+    const newUser: MockUser = {
+      id: "usr-" + Math.random().toString(36).substring(2, 11),
       nik: data.nik,
       name: data.name,
       email: data.email,
       phoneNumber: data.phoneNumber,
       role: data.role || "EMPLOYEE",
-      branchId: data.branchId,
-      shiftId: data.shiftId,
+      branchId: data.branchId || store.branches[0]?.id || null,
+      shiftId: data.shiftId || store.shifts[0]?.id || null,
       passwordHash,
       deviceId: null,
       deviceName: null,
@@ -236,10 +365,11 @@ export const dbService = {
       isActive: true,
       pdpConsentAccepted: false,
       pdpConsentAt: null,
-      createdAt: new Date(),
-      updatedAt: new Date(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
     };
-    memoryStore.users.push(newUser);
+    store.users.push(newUser);
+    saveStore(store);
     return newUser;
   },
 
@@ -250,10 +380,12 @@ export const dbService = {
         data: { pdpConsentAccepted: true, pdpConsentAt: new Date() },
       });
     }
-    const user = memoryStore.users.find((u) => u.id === userId);
+    const store = loadStore();
+    const user = store.users.find((u) => u.id === userId);
     if (user) {
       user.pdpConsentAccepted = true;
-      user.pdpConsentAt = new Date();
+      user.pdpConsentAt = new Date().toISOString();
+      saveStore(store);
     }
     return user;
   },
@@ -269,11 +401,35 @@ export const dbService = {
         },
       });
     }
-    const user = memoryStore.users.find((u) => u.id === userId);
+    const store = loadStore();
+    const user = store.users.find((u) => u.id === userId);
     if (user) {
       user.deviceId = deviceId;
       user.deviceName = deviceName;
-      user.deviceBoundAt = new Date();
+      user.deviceBoundAt = new Date().toISOString();
+      saveStore(store);
+    }
+    return user;
+  },
+
+  async resetUserDevice(userId: string) {
+    if (await testDbConnection()) {
+      return prisma.user.update({
+        where: { id: userId },
+        data: {
+          deviceId: null,
+          deviceName: null,
+          deviceBoundAt: null,
+        },
+      });
+    }
+    const store = loadStore();
+    const user = store.users.find((u) => u.id === userId);
+    if (user) {
+      user.deviceId = null;
+      user.deviceName = null;
+      user.deviceBoundAt = null;
+      saveStore(store);
     }
     return user;
   },
@@ -281,17 +437,32 @@ export const dbService = {
   // BRANCH METHODS
   async getAllBranches() {
     if (await testDbConnection()) {
-      return prisma.branch.findMany({ where: { isActive: true }, orderBy: { name: "asc" } });
+      return prisma.branch.findMany({
+        where: { isActive: true },
+        orderBy: { name: "asc" },
+      });
     }
-    return memoryStore.branches.filter((b) => b.isActive);
+    const store = loadStore();
+    return store.branches.filter((b) => b.isActive);
   },
 
   async createBranch(data: any) {
     if (await testDbConnection()) {
-      return prisma.branch.create({ data });
+      return prisma.branch.create({
+        data: {
+          code: data.code,
+          name: data.name,
+          address: data.address,
+          latitude: Number(data.latitude),
+          longitude: Number(data.longitude),
+          radiusMeters: Number(data.radiusMeters) || 150,
+          timezone: data.timezone || "Asia/Jakarta",
+        },
+      });
     }
+    const store = loadStore();
     const newBranch = {
-      id: "branch-" + Math.random().toString(36).substr(2, 9),
+      id: "branch-" + Math.random().toString(36).substring(2, 11),
       code: data.code,
       name: data.name,
       address: data.address,
@@ -300,10 +471,11 @@ export const dbService = {
       radiusMeters: Number(data.radiusMeters) || 150,
       timezone: data.timezone || "Asia/Jakarta",
       isActive: true,
-      createdAt: new Date(),
-      updatedAt: new Date(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
     };
-    memoryStore.branches.push(newBranch);
+    store.branches.push(newBranch);
+    saveStore(store);
     return newBranch;
   },
 
@@ -311,10 +483,16 @@ export const dbService = {
     if (await testDbConnection()) {
       return prisma.branch.update({ where: { id }, data });
     }
-    const idx = memoryStore.branches.findIndex((b) => b.id === id);
+    const store = loadStore();
+    const idx = store.branches.findIndex((b) => b.id === id);
     if (idx !== -1) {
-      memoryStore.branches[idx] = { ...memoryStore.branches[idx], ...data, updatedAt: new Date() };
-      return memoryStore.branches[idx];
+      store.branches[idx] = {
+        ...store.branches[idx],
+        ...data,
+        updatedAt: new Date().toISOString(),
+      };
+      saveStore(store);
+      return store.branches[idx];
     }
     return null;
   },
@@ -322,27 +500,41 @@ export const dbService = {
   // SHIFT METHODS
   async getAllShifts() {
     if (await testDbConnection()) {
-      return prisma.shift.findMany({ where: { isActive: true }, orderBy: { startTime: "asc" } });
+      return prisma.shift.findMany({
+        where: { isActive: true },
+        orderBy: { startTime: "asc" },
+      });
     }
-    return memoryStore.shifts.filter((s) => s.isActive);
+    const store = loadStore();
+    return store.shifts.filter((s) => s.isActive);
   },
 
   async createShift(data: any) {
     if (await testDbConnection()) {
-      return prisma.shift.create({ data });
+      return prisma.shift.create({
+        data: {
+          name: data.name,
+          startTime: data.startTime,
+          endTime: data.endTime,
+          lateToleranceMinutes: Number(data.lateToleranceMinutes) || 15,
+          earlyDepartureToleranceMinutes: Number(data.earlyDepartureToleranceMinutes) || 0,
+        },
+      });
     }
+    const store = loadStore();
     const newShift = {
-      id: "shift-" + Math.random().toString(36).substr(2, 9),
+      id: "shift-" + Math.random().toString(36).substring(2, 11),
       name: data.name,
       startTime: data.startTime,
       endTime: data.endTime,
       lateToleranceMinutes: Number(data.lateToleranceMinutes) || 15,
       earlyDepartureToleranceMinutes: Number(data.earlyDepartureToleranceMinutes) || 0,
       isActive: true,
-      createdAt: new Date(),
-      updatedAt: new Date(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
     };
-    memoryStore.shifts.push(newShift);
+    store.shifts.push(newShift);
+    saveStore(store);
     return newShift;
   },
 
@@ -351,7 +543,6 @@ export const dbService = {
     const { encryptedEmbedding, iv, authTag } = encryptBiometricEmbedding(descriptor);
 
     if (await testDbConnection()) {
-      // Inactivate previous templates
       await prisma.faceTemplate.updateMany({
         where: { userId, isActive: true },
         data: { isActive: false },
@@ -370,22 +561,23 @@ export const dbService = {
       });
     }
 
-    // In-memory
-    memoryStore.faceTemplates
+    const store = loadStore();
+    store.faceTemplates
       .filter((f) => f.userId === userId && f.isActive)
       .forEach((f) => (f.isActive = false));
 
     const newTemplate = {
-      id: "ft-" + Math.random().toString(36).substr(2, 9),
+      id: "ft-" + Math.random().toString(36).substring(2, 11),
       userId,
       encryptedEmbedding,
       iv,
       authTag,
       sampleCount,
       isActive: true,
-      enrolledAt: new Date(),
+      enrolledAt: new Date().toISOString(),
     };
-    memoryStore.faceTemplates.push(newTemplate);
+    store.faceTemplates.push(newTemplate);
+    saveStore(store);
     return newTemplate;
   },
 
@@ -397,9 +589,11 @@ export const dbService = {
         orderBy: { enrolledAt: "desc" },
       });
     } else {
-      template = memoryStore.faceTemplates.find(
+      const store = loadStore();
+      const userTemplates = store.faceTemplates.filter(
         (f) => f.userId === userId && f.isActive
       );
+      template = userTemplates[userTemplates.length - 1] || null;
     }
 
     if (!template) return null;
@@ -415,7 +609,7 @@ export const dbService = {
     }
   },
 
-  async resetUserFace(userId: string, adminId?: string) {
+  async resetUserFace(userId: string) {
     if (await testDbConnection()) {
       await prisma.faceTemplate.updateMany({
         where: { userId },
@@ -423,9 +617,11 @@ export const dbService = {
       });
       return true;
     }
-    memoryStore.faceTemplates
+    const store = loadStore();
+    store.faceTemplates
       .filter((f) => f.userId === userId)
       .forEach((f) => (f.isActive = false));
+    saveStore(store);
     return true;
   },
 
@@ -434,17 +630,19 @@ export const dbService = {
     if (await testDbConnection()) {
       return prisma.attendance.create({ data });
     }
+    const store = loadStore();
     const newAtt = {
-      id: "att-" + Math.random().toString(36).substr(2, 9),
+      id: "att-" + Math.random().toString(36).substring(2, 11),
       ...data,
-      timestampServer: new Date(),
-      createdAt: new Date(),
+      timestampServer: new Date().toISOString(),
+      createdAt: new Date().toISOString(),
     };
-    memoryStore.attendances.unshift(newAtt);
+    store.attendances.unshift(newAtt);
+    saveStore(store);
     return newAtt;
   },
 
-  async getUserAttendances(userId: string, limit: number = 30) {
+  async getUserAttendances(userId: string, limit: number = 50) {
     if (await testDbConnection()) {
       return prisma.attendance.findMany({
         where: { userId },
@@ -453,13 +651,14 @@ export const dbService = {
         take: limit,
       });
     }
-    return memoryStore.attendances
+    const store = loadStore();
+    return store.attendances
       .filter((a) => a.userId === userId)
       .slice(0, limit)
       .map((a) => ({
         ...a,
-        branch: memoryStore.branches.find((b) => b.id === a.branchId),
-        shift: memoryStore.shifts.find((s) => s.id === a.shiftId),
+        branch: store.branches.find((b) => b.id === a.branchId) || store.branches[0],
+        shift: store.shifts.find((s) => s.id === a.shiftId) || store.shifts[0],
       }));
   },
 
@@ -475,11 +674,19 @@ export const dbService = {
         take: 100,
       });
     }
-    return memoryStore.attendances.map((a) => ({
+    const store = loadStore();
+    let list = [...store.attendances];
+    if (filters?.branchId) {
+      list = list.filter((a) => a.branchId === filters.branchId);
+    }
+    if (filters?.status) {
+      list = list.filter((a) => a.status === filters.status);
+    }
+    return list.map((a) => ({
       ...a,
-      user: memoryStore.users.find((u) => u.id === a.userId),
-      branch: memoryStore.branches.find((b) => b.id === a.branchId),
-      shift: memoryStore.shifts.find((s) => s.id === a.shiftId),
+      user: store.users.find((u) => u.id === a.userId),
+      branch: store.branches.find((b) => b.id === a.branchId) || store.branches[0],
+      shift: store.shifts.find((s) => s.id === a.shiftId) || store.shifts[0],
     }));
   },
 
@@ -499,7 +706,8 @@ export const dbService = {
         },
       });
     } else {
-      attendances = memoryStore.attendances.filter((a) => {
+      const store = loadStore();
+      attendances = store.attendances.filter((a) => {
         const d = new Date(a.timestampServer).toISOString().slice(0, 10);
         return d === today;
       });
@@ -526,14 +734,18 @@ export const dbService = {
     if (await testDbConnection()) {
       return prisma.leaveRequest.create({ data });
     }
+    const store = loadStore();
     const newLeave = {
-      id: "leave-" + Math.random().toString(36).substr(2, 9),
+      id: "leave-" + Math.random().toString(36).substring(2, 11),
       ...data,
+      startDate: new Date(data.startDate).toISOString(),
+      endDate: new Date(data.endDate).toISOString(),
       status: "PENDING",
-      createdAt: new Date(),
-      updatedAt: new Date(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
     };
-    memoryStore.leaveRequests.unshift(newLeave);
+    store.leaveRequests.unshift(newLeave);
+    saveStore(store);
     return newLeave;
   },
 
@@ -544,7 +756,8 @@ export const dbService = {
         orderBy: { createdAt: "desc" },
       });
     }
-    return memoryStore.leaveRequests.filter((l) => l.userId === userId);
+    const store = loadStore();
+    return store.leaveRequests.filter((l) => l.userId === userId);
   },
 
   async getAllLeaveRequests() {
@@ -554,13 +767,19 @@ export const dbService = {
         orderBy: { createdAt: "desc" },
       });
     }
-    return memoryStore.leaveRequests.map((l) => ({
+    const store = loadStore();
+    return store.leaveRequests.map((l) => ({
       ...l,
-      user: memoryStore.users.find((u) => u.id === l.userId),
+      user: store.users.find((u) => u.id === l.userId),
     }));
   },
 
-  async updateLeaveStatus(id: string, status: "APPROVED" | "REJECTED", approvedById: string, rejectionReason?: string) {
+  async updateLeaveStatus(
+    id: string,
+    status: "APPROVED" | "REJECTED",
+    approvedById: string,
+    rejectionReason?: string
+  ) {
     if (await testDbConnection()) {
       return prisma.leaveRequest.update({
         where: { id },
@@ -572,22 +791,71 @@ export const dbService = {
         },
       });
     }
-    const idx = memoryStore.leaveRequests.findIndex((l) => l.id === id);
+    const store = loadStore();
+    const idx = store.leaveRequests.findIndex((l) => l.id === id);
     if (idx !== -1) {
-      memoryStore.leaveRequests[idx] = {
-        ...memoryStore.leaveRequests[idx],
+      store.leaveRequests[idx] = {
+        ...store.leaveRequests[idx],
         status,
         approvedById,
-        approvedAt: new Date(),
+        approvedAt: new Date().toISOString(),
         rejectionReason,
-        updatedAt: new Date(),
+        updatedAt: new Date().toISOString(),
       };
-      return memoryStore.leaveRequests[idx];
+      saveStore(store);
+      return store.leaveRequests[idx];
     }
     return null;
   },
 
   // AUDIT LOGS
+  async createAuditLogEntry(data: {
+    userId?: string | null;
+    action: "CREATE" | "UPDATE" | "DELETE" | "LOGIN" | "ENROLL_FACE" | "DEVICE_BIND" | "RESET_FACE";
+    entityName: string;
+    entityId?: string | null;
+    oldValues?: any;
+    newValues?: any;
+    ipAddress?: string;
+    userAgent?: string;
+  }) {
+    if (await testDbConnection()) {
+      try {
+        return await prisma.auditLog.create({
+          data: {
+            userId: data.userId || undefined,
+            action: data.action,
+            entityName: data.entityName,
+            entityId: data.entityId || undefined,
+            oldValues: data.oldValues ? JSON.stringify(data.oldValues) : undefined,
+            newValues: data.newValues ? JSON.stringify(data.newValues) : undefined,
+            ipAddress: data.ipAddress || "127.0.0.1",
+            userAgent: data.userAgent || "Web Browser",
+          },
+        });
+      } catch {
+        // Fallback to local store
+      }
+    }
+
+    const store = loadStore();
+    const newLog = {
+      id: store.auditLogs.length + 1,
+      userId: data.userId || null,
+      action: data.action,
+      entityName: data.entityName,
+      entityId: data.entityId || null,
+      oldValues: data.oldValues ? JSON.stringify(data.oldValues) : null,
+      newValues: data.newValues ? JSON.stringify(data.newValues) : null,
+      ipAddress: data.ipAddress || "127.0.0.1",
+      userAgent: data.userAgent || "Web Browser",
+      createdAt: new Date().toISOString(),
+    };
+    store.auditLogs.unshift(newLog);
+    saveStore(store);
+    return newLog;
+  },
+
   async getAllAuditLogs() {
     if (await testDbConnection()) {
       return prisma.auditLog.findMany({
@@ -596,9 +864,10 @@ export const dbService = {
         take: 100,
       });
     }
-    return memoryStore.auditLogs.map((log) => ({
+    const store = loadStore();
+    return store.auditLogs.map((log) => ({
       ...log,
-      user: memoryStore.users.find((u) => u.id === log.userId),
+      user: store.users.find((u) => u.id === log.userId),
     }));
   },
 };

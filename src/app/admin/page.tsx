@@ -11,11 +11,11 @@ import {
   Clock,
   AlertCircle,
   Building2,
-  Calendar,
   FileSpreadsheet,
   Shield,
   ArrowUpRight,
-  TrendingUp,
+  Check,
+  X,
 } from "lucide-react";
 
 export default function AdminDashboard() {
@@ -30,9 +30,10 @@ export default function AdminDashboard() {
     attendanceRate: 0,
   });
   const [recentAttendances, setRecentAttendances] = useState<any[]>([]);
+  const [leaves, setLeaves] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
+  const loadAll = async () => {
     const token = localStorage.getItem("accessToken");
     if (!token) {
       router.replace("/login");
@@ -48,22 +49,51 @@ export default function AdminDashboard() {
       setUser(u);
     }
 
-    // Load stats
-    Promise.all([
-      fetch("/api/admin/stats", { headers: { Authorization: `Bearer ${token}` } }).then((r) =>
-        r.json()
-      ),
-      fetch("/api/admin/attendances", { headers: { Authorization: `Bearer ${token}` } }).then((r) =>
-        r.json()
-      ),
-    ])
-      .then(([statsData, attData]) => {
-        if (statsData.stats) setStats(statsData.stats);
-        if (attData.attendances) setRecentAttendances(attData.attendances.slice(0, 8));
-      })
-      .catch((err) => console.error(err))
-      .finally(() => setLoading(false));
+    try {
+      const [statsData, attData, leavesData] = await Promise.all([
+        fetch("/api/admin/stats", { headers: { Authorization: `Bearer ${token}` } }).then((r) =>
+          r.json()
+        ),
+        fetch("/api/admin/attendances", { headers: { Authorization: `Bearer ${token}` } }).then((r) =>
+          r.json()
+        ),
+        fetch("/api/leaves", { headers: { Authorization: `Bearer ${token}` } }).then((r) =>
+          r.json()
+        ),
+      ]);
+
+      if (statsData.stats) setStats(statsData.stats);
+      if (attData.attendances) setRecentAttendances(attData.attendances.slice(0, 8));
+      if (leavesData.leaves) setLeaves(leavesData.leaves);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadAll();
   }, [router]);
+
+  const handleLeaveApproval = async (id: string, status: "APPROVED" | "REJECTED") => {
+    const token = localStorage.getItem("accessToken");
+    try {
+      const res = await fetch("/api/leaves", {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ id, status }),
+      });
+      if (res.ok) {
+        loadAll();
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 pb-24">
@@ -191,6 +221,65 @@ export default function AdminDashboard() {
             <Shield className="h-4 w-4 text-gray-400" />
           </Link>
         </div>
+
+        {/* Pending Leave Approvals if any */}
+        {leaves.length > 0 && (
+          <div className="rounded-2xl border border-gray-100 bg-white p-5 shadow-sm">
+            <h2 className="text-sm font-bold text-gray-900">Permohonan Izin / Sakit Karyawan</h2>
+            <p className="text-xs text-gray-500">Persetujuan izin, cuti, dan dinas luar</p>
+
+            <div className="mt-3 space-y-2">
+              {leaves.slice(0, 5).map((l) => (
+                <div
+                  key={l.id}
+                  className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-xl border border-gray-100 bg-gray-50/70 p-3 text-xs"
+                >
+                  <div>
+                    <span className="font-bold text-gray-900">{l.user?.name || "Karyawan"}</span>
+                    <span className="mx-1.5 text-gray-400">•</span>
+                    <span className="font-semibold text-indigo-600">{l.type}</span>
+                    <span className="ml-2 text-gray-500">
+                      ({new Date(l.startDate).toLocaleDateString("id-ID")} s/d{" "}
+                      {new Date(l.endDate).toLocaleDateString("id-ID")})
+                    </span>
+                    <p className="mt-1 text-gray-600 italic">&quot;{l.reason}&quot;</p>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    {l.status === "PENDING" ? (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => handleLeaveApproval(l.id, "APPROVED")}
+                          className="flex items-center gap-1 rounded-lg bg-green-600 px-3 py-1.5 font-bold text-white hover:bg-green-700"
+                        >
+                          <Check className="h-3.5 w-3.5" /> Setujui
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleLeaveApproval(l.id, "REJECTED")}
+                          className="flex items-center gap-1 rounded-lg bg-red-600 px-3 py-1.5 font-bold text-white hover:bg-red-700"
+                        >
+                          <X className="h-3.5 w-3.5" /> Tolak
+                        </button>
+                      </>
+                    ) : (
+                      <span
+                        className={`rounded-full px-2.5 py-0.5 text-[10px] font-bold ${
+                          l.status === "APPROVED"
+                            ? "bg-green-100 text-green-700"
+                            : "bg-red-100 text-red-700"
+                        }`}
+                      >
+                        {l.status === "APPROVED" ? "Disetujui" : "Ditolak"}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Live Attendance Stream Table */}
         <div className="rounded-2xl border border-gray-100 bg-white p-5 shadow-sm">
